@@ -5,3 +5,5 @@ all:
 	@rm -rf amain.o cmain.o
 clear:
 	@rm -rf amain.o cmain.o a.out
+run: all
+	@./a.out

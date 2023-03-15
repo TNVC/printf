@@ -1,13 +1,6 @@
 stdout equ 01h
 System.Write equ 04h
 
-macro when val
-{
-  cmp byte [edi], `val          ;\
-  je . # val                    ; | if ([EDI] == 'val') goto .val
-  ;; jmp table
-}
-
 macro case val, soubrutine
 {
 . # val :
@@ -46,14 +39,38 @@ endl
 
   mov edi, eax                  ; EDI = format.nextHead()
 
-  when s
-  when c
-  when b
-  when o
-  when x
-  when d
-  when %
+  movzx eax, byte [edi]         ; EAX = [EDI]
 
+  cmp al, '%'                   ;\
+  je .%                         ; | if ([EDI] == '%') goto .%
+
+  cmp al, 'b'                   ;\
+  jl ._                         ; | if ([EDI] < 'b') goto ._
+
+  cmp al, 'x'                   ;\
+  jg ._                         ; | if ([EDI] > 'x') goto ._
+
+  sub eax, 'b'                  ;\
+  shl eax, 02h                  ; |
+  add eax, .table               ; | EAX = Poiter<Code>([EDI])
+
+  jmp dword [eax]               ; goto Table.get(EAX)
+
+.table:
+  dd .b                          ; 62 'b'
+  dd .c                          ; 63 'c'
+  dd .d                          ; 64 'd'
+  dd 01h dup(._)
+  dd .f                          ; 66 'f'
+  dd 08h dup(._)
+  dd .o                          ; 6f 'o'
+  dd 03h dup(._)
+  dd .s                          ; 73 's'
+  dd 04h dup(._)
+  dd .x                          ; 78 'x'
+
+._:
+  stdcall putchar, '%' ; putchar('%')
   jmp .head
 .%:
   stdcall putchar, '%' ; putchar('%')
@@ -76,7 +93,6 @@ endl
 
 .number:
   stdcall prints, esi           ; prints(..buffer)
-  jmp .end
 
 .end:
   add ebx, 04h                    ; EBX.nextArg()
@@ -344,7 +360,7 @@ proc decToStr stdcall uses eax ecx edx ebx edi, number: dword, buffer: dword
   mov byte [ebx], '-'           ; \
   inc ebx                       ;  | [EBX] = '-'
 
-  neg eax                       ; EAX = ~EAX
+  neg eax                       ; EAX = -EAX
 
 @@:
   xor ecx, ecx                  ; Loop.initCounter(ECX)
@@ -379,128 +395,244 @@ endp
 ;;; @param [in] number - number for translate to flaot string
 ;;; @param [in/out] buffer - buffer for translated string
 ;;; ================================================================
-proc floatToStr stdcall uses eax ecx edx ebx edi, number: dword, buffer: dword
+proc floatToStr stdcall uses eax ecx edx ebx edi esi, number: dword, buffer: dword
 
 locals
-  useExp dw 00h
-  m      dw 00h
-  m0     dw 00h
-  digit  dw 00h
-  neg    dw 00h
-  weight dw 00h
-  temp   dw 00h
+  digit  dd ?
+  m      dd ?
+  m1     dd ?
+  _neg   dd ?
+  useExp dd ?
+  weight dd ?
+  i      dd ?
+  j      dd ?
+  const  dd 1e-12
+  temp0  dd ?
+  temp1  dd ?
+  temp2  dd ?
 endl
 
-  mov eax, dword [number]       ;\
-  mov edi, eax                  ; | EDI = EAX = number
+  xor eax, eax                  ; EAX = 00h
   mov ebx, dword [buffer]       ; EBX = buffer
 
-  ;; if (isNaN(EAX))
-  ;; if (isInf(EAX))
-  ;; if (isZero(EAX))
-  ;; AL - useExp, CL - neg, CH - m, AH - m0
-  xor ecx, ecx                  ;\
-  fld dword [ss:number]         ; | push(EAX)
+  ;; if (isNaN(EAX))  return 'NaN'
+  ;; if (isInf(EAX))  return 'Inf'
+  ;; if (isZero(EAX)) return '0'
 
-  ftst                          ;\
-  fstsw ax                      ; |
-  sahf                          ; | FLAGS = compare(ST(0), .0)
+  fldz                          ; push(0)
+  fld dword [number]            ; push(number)
 
-  xor ax, ax                    ; AX = 00h
+  fcomip st, st1                ;\
+  seta al                       ; | AL = (st0 < st1)
 
-  cmovb cx, ax                 ; if (ST(0) < .0) CX = 00h
-  mov byte [neg], cl            ; neg = CL
+  fstp st0                      ; pop()
 
-  test cl, cl                   ;\
-  jz @f                         ; | if (CL) goto @f
+  mov dword [_neg], eax         ; _neg = EAX
 
-  fchs                          ; ST(0) = -ST(0)
+  cmp al, 00h                   ;\
+  jne @f                        ; | if (!AL) goto @f
 
-  mov byte [es:ebx], '-'        ;\
-  inc ebx                       ; | [ES:EBX++] = '-'
+  fld dword [number]            ;\
+  fchs                          ; |
+  fstp dword [number]           ; | number = -number
+
+  mov byte [ebx], '-'           ;\
+  inc ebx                       ; | *(buffer++) = '-'
 @@:
-  fldlg2                        ; push(lg(2))
-  fld st1                       ; push(ST(1))
 
-  fyl2x                         ; push(lb(pop()) * pop())
+  fldlg2                        ;\
+  fld dword [number]            ; |
+  fyl2x                         ; | push(log2(number) * lg(2))
+  fistp dword [m]               ; m = Int(pop())
 
-  fistp dword [m]               ;\
-  mov ch, byte [m]              ; | m = CH = Int(pop())
+  mov eax, dword [m]            ; EAX = m
 
-  cmp ch, 14d                   ;\
-  jge .useExp                   ; |
+  cmp eax, 0Eh                  ;\
+  jge .useExp_true              ; | if (m >= 14d) goto .useExp_true
 
-  cmp ch, -9d                   ; |
-  jbe .useExp                   ; |
+  cmp eax, -09h                 ;\
+  jle .useExp_true              ; | if (m <= -9d) goto .useExp_true
 
-  cmp ch,  9d                   ; |
-  jb .skip                      ; |
+  cmp eax, 09h                  ;\
+  jl .useExp_false              ; | if (m < 9d) goto .useExp_false
 
-  test cl, cl                   ; |
-  jz .skip                      ; | if (!(m >= 14d || neg && m >= 9d || m <= -9d) goto .skip
+  mov eax, dword [_neg]         ; EAX = _neg
 
-.useExp:
-  mov al, 01h                   ; AL = 01h
+  test eax, eax                 ;\
+  jz .useExp_true               ; | if (!neg) goto .useExp_false
 
-  cmp ch, 00h                   ;\
-  jge @f                        ; |
-  sub ch, 01h                   ; | if (m < 0) m -= 01h
+.useExp_true:
+  mov dword [useExp], 01h       ; useExp = 01h
+  jmp @f
+.useExp_false:
+  mov dword [useExp], 00h       ; useExp = 00h
+@@:
 
-  mov byte [m0], ch             ; m1 = m
+  cmp dword [useExp], 00h       ;\
+  je .endIf0                    ; | if (!useExp) goto .endIf0
 
-  stdcall power, 0Ah, dword [m] ;\
-  mov dword [digit], eax         ; |
-  fld dword [digit]              ; | push(power(0Ah, m))
+  cmp dword [m], 00h            ;\
+  jge @f                        ; | if (m >= 00h) goto @f
+
+  sub dword [m], 01h            ; m -= 1
+@@:
+
+  stdcall power, 10.0, dword [m] ; EAX = power(10.0, m)
+
+  fld dword [number]            ; push(number)
+  mov dword [temp0], eax        ;\
+  fld dword [temp0]             ; | push(EAX)
 
   fdivp                         ; push(1/pop()*pop())
+  fstp dword [number]           ; number = pop()
 
-  mov byte [m], 00h             ; m = 00h
-@@:
+  mov eax, dword [m]            ;\
+  mov dword [m1], eax           ; | m1= m
+  mov dword [m], 00h            ; m = 00h
+.endIf0:
 
-  mov dword [temp], 1e-12      ; temp = 1e-12
-
-  mov cl, byte [m]              ;\
-  cmp byte [m], 01h             ; |
-  jge .loop                     ; |
-  xor cl, cl                    ; | if (m < 01h) m = 00h
-.loop:
-
-  cmp cl, 00h                   ;\
+  cmp dword [m], 01h            ;\
   jge @f                        ; |
-
-  fcom dword [temp]             ; |
-  fstsw ax                      ; |
-  sahf                          ; |
-  jg @f                         ; | while (number > 1e-12 || m >= 00h)
-
-  jmp .endLoop
+  mov dword [m], 00h            ; | if (m < 01h) m = 00h
 @@:
 
-  stdcall power, 0Ah, dword [m0] ;\
-  mov dword [weight], eax        ; |
-  fld dword [weight]             ; | weight = power(0Ah, m)
+  jmp .condLoop0
+.startLoop0:
 
-  cmp eax, 00h                  ;\
-  jle @f                        ; |
+  stdcall power, 10.0, dword [m] ;\
+  mov dword [weight], eax        ; | weight = power(10.0, m)
 
-  stdcall isinf, eax            ; |
-  test bl, bl                   ; |
-  jnz @f                        ; | if (weight > 0 && !isnan(digit))
+  fldz                          ; push(0)
+  fld dword [weight]            ; push(weight)
+  fcomip st, st1                          ;\
+  fstp st0                      ; pop()   ; |
+  jbe @f                                  ; | if (pop() <= pop()) goto @f
 
-;;;  ...
+  stdcall isinf, dword [weight] ; EAX = isinf(weight)
+  cmp eax, 01h                  ;\
+  je @f                         ; | if (EAX) goto @f
 
-  dec cl                        ; --m
+  fld dword [number]            ; push(number)
+  fld dword [weight]            ; push(weight)
+  fdivp                         ; push(1/pop()*pop())
 
+  fst dword [temp0]             ;\
+  stdcall floor, dword [temp0]  ; |
+  mov dword [digit], eax        ; | digit = floor(top())
+
+  fld dword [weight]            ; push(weight)
+  fmulp                         ; push(pop()*pop())
+  fsub dword [number]           ; ST(0) -= number
+  fchs                          ; ST(0) = -ST(0)
+  fstp dword [number]           ; number = pop()
+
+  mov eax, dword [digit]        ;\
+  add eax, '0'                  ; | EAX = digit + '0'
+
+  mov byte [ebx], al            ;\
+  inc ebx                       ; | *(buffer++) = AL
 @@:
 
-.endLoop:
+  cmp dword [m], 00h            ;\
+  jne @f                        ; | if (m != 00h) goto @f
 
-.skip:
-  ;; sign - 31, power - 30-23, mantice - 22-0
-  ;; s * (m * 2 ^ -23) * (2 ^(e-127))
-  ;; TODO
+  cmp dword [number], 00h       ;\
+  jle @f                        ; | if (number <= 00h) goto @f
 
-  mov byte [es:ebx], 00h        ; EBX.setEndOfString()
+  mov byte [ebx], '.'           ;\
+  inc ebx                       ; | *(buffer++) = '.'
+@@:
+
+  sub dword [m], 01h            ; --m
+
+.condLoop0:
+  cmp dword [m], 00h            ;\
+  jge .startLoop0               ; | if (m >= 00h) goto .startLoop0
+
+  fld dword [const]             ; push(1e-12)
+  fld dword [number]            ; push(number)
+  fcomip st, st1                        ;\
+  fstp st0                      ; pop() ; |
+  jg .startLoop0                        ; | if (number > 1e-12) goto .startLoop0
+
+  cmp dword [useExp], 00h       ;\
+  je @f                         ; | if (!useExp) goto @f
+
+  mov byte [ebx], 'e'           ;\
+  inc ebx                       ; | *(buffer++) = 'e'
+
+  cmp dword [m1], 00h           ;\
+  jle .else                     ; | if (m1 <= 00h) goto .else
+
+  mov byte [ebx], '+'           ;\
+  inc ebx                       ; | *(buffer++) = '+'
+
+  jmp .endIf
+.else:
+  mov byte [ebx], '-'           ;\
+  inc ebx                       ; | *(buffer++) = '-'
+  neg dword [m1]                ; m1 = -m1
+
+.endIf:
+  mov dword [m], 00h            ; m = 00h
+
+  jmp .condLoop1
+.startLoop1:
+
+  xor edx, edx                  ; EDX = 00h
+  mov eax, dword [m1]           ; EAX = m1
+
+  mov esi, 0Ah                  ;\
+  idiv esi                      ; | EDX = EAX % 0Ah, EAX = EAX / 0AH
+
+  mov dword [m1], eax           ; m1 /= 0Ah
+
+  mov al, '0'                   ;\
+  add al, dl                    ; | AL = '0' + Dl
+
+  mov byte [ebx], al            ;\
+  inc ebx                       ; | *(buffer++) = AL
+
+  inc dword [m]                 ; ++m
+
+.condLoop1:
+  cmp dword [m1], 00h           ;\
+  jg .startLoop1                ; | if (m1 > 00h) goto .startLoop1
+
+  sub ebx, dword [m]            ; buffer -= m
+
+  mov edi, 00h                  ; i = 00h
+  mov esi, dword [m]            ;\
+  dec esi                       ; | j = m - 01h
+
+  jmp .condLoop2
+.startLoop2:
+
+  mov eax, ebx                  ;\
+  add eax, edi                  ; | EAX = buffer + i
+
+  mov edx, ebx                  ;\
+  add edx, esi                  ; | EDX = buffer + j
+
+  mov cl, byte [eax]            ; CL = [EAX]
+  mov ch, byte [edx]            ; CH = [EAX]
+
+  xchg cl, ch                   ; Swap(CL, CH)
+
+  mov byte [eax], cl            ; [EAX] = CL
+  mov byte [edx], ch            ; [EAX] = CH
+
+  inc edi                       ; ++i
+  dec esi                       ; --j
+
+.condLoop2:
+  cmp edi, esi                  ;\
+  jl .startLoop2                ; | if (i < j) goto .startLoop2
+
+  add ebx, dword [m]            ; buffer += m
+@@:
+
+  mov byte [es:ebx], 00h        ; *buffer = 00h
   ret
 endp
 ;;; ================================================================
@@ -512,10 +644,18 @@ endp
 ;;; @param [in] index - index of power
 ;;; @return EAX - power
 ;;; ================================================================
-proc power stdcall uses eax, base: dword, index: byte
+proc power stdcall uses ecx, base: dword, index: byte
 
   fld dword [base]              ; push(base)
-;;; TODO
+
+  mov ecx, dword [index]        ; Loop.initCounter(ECX)
+@@:
+  fmul dword [base]             ; push(pop()*base)
+  loop @b                       ; Loop.updateAndCheckCounter(ECX)
+
+  fstp dword [base]             ;\
+  mov eax, dword [base]         ; | EAX = pop()
+
   ret
 endp
 ;;; ================================================================
@@ -524,11 +664,62 @@ endp
 ;;; Check number for infinit
 ;;; ================================================================
 ;;; @param [in] number - number for check
-;;; @return BL - bool
+;;; @return EAX - bool
 ;;; ================================================================
-proc isinf stdcall uses eax, number: dword
+proc isinf stdcall uses ebx, number: dword
 
-;;; TODO
+  mov eax, dword [number]       ; EAX = number
+
+  mov ebx, eax                  ;\
+  and ebx, 07FFFFFh             ; | EBX = base(EAX)
+
+  test ebx, ebx                 ;\
+  jne @f                        ; | if (!EBX) goto @f
+
+  mov ebx, eax                  ;\
+  and ebx, 07F800000h           ; |
+  shr ebx, 017h                 ; | EBX = exp(EAX)
+
+  cmp ebx, 0FFh                 ;\
+  jne @f                        ; | if (EBX != 0FFh) goto @f
+
+  mov eax, 01h                  ; EAX = 01h
+  jmp .endp
+@@:
+  xor eax, eax                  ; EAX = 00h
+.endp:
+  ret
+endp
+;;; ================================================================
+
+;;; ================================================================
+;;; Check number for NaN
+;;; ================================================================
+;;; @param [in] number - number for check
+;;; @return EAX - bool
+;;; ================================================================
+proc isnan stdcall uses ebx, number: dword
+
+  mov eax, dword [number]       ; EAX = number
+
+  mov ebx, eax                  ;\
+  and ebx, 07FFFFFh             ; | EBX = base(EAX)
+
+  test ebx, ebx                 ;\
+  je @f                         ; | if (EBX) goto @f
+
+  mov ebx, eax                  ;\
+  and ebx, 07F800000h           ; |
+  shr ebx, 017h                 ; | EBX = exp(EAX)
+
+  cmp ebx, 0FFh                 ;\
+  jne                           ; | if (EBX != 0FFh) goto @f
+
+  mov eax, 01h                  ; EAX = 01h
+  jmp .endp
+@@:
+  xor eax, eax                  ; EAX = 00h
+.endp:
   ret
 endp
 ;;; ================================================================
@@ -539,9 +730,30 @@ endp
 ;;; @param [in] number - number for floor
 ;;; @return EAX - bool
 ;;; ================================================================
-proc floor stdcall uses eax, number: dword
+proc floor stdcall number: dword
 
-;;; TODO
+locals
+  originalBuffer dw ?
+  buffer         dw ?
+endl
+
+  fnstcw word [originalBuffer]  ; originalBuffer = CR
+
+  mov ax, word [originalBuffer] ;\
+  and ax, 0F3FFh                ; |
+  or  ax, 00400h                ; |
+  mov word [buffer], ax         ; | buffer = CR & 0F3FFh | 00400h
+
+  fldcw word [buffer]           ; CR = buffer
+
+  fld dword [number]            ;\
+  frndint                       ; | push(Int(number))
+
+  fistp dword [number]          ;\
+  mov eax, dword [number]       ; | EAX = pop()
+
+  fldcw word [originalBuffer]   ; CR = originalBuffer
+
   ret
 endp
 ;;; ================================================================
