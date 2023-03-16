@@ -395,244 +395,273 @@ endp
 ;;; @param [in] number - number for translate to flaot string
 ;;; @param [in/out] buffer - buffer for translated string
 ;;; ================================================================
-proc floatToStr stdcall uses eax ecx edx ebx edi esi, number: dword, buffer: dword
+proc floatToStr stdcall uses eax ecx edx ebx, number: dword, buffer: dword
 
 locals
-  digit  dd ?
-  m      dd ?
-  m1     dd ?
-  _neg   dd ?
-  useExp dd ?
-  weight dd ?
-  i      dd ?
-  j      dd ?
-  const  dd 1e-12
-  temp0  dd ?
-  temp1  dd ?
-  temp2  dd ?
+  temp1 dd ?
+  temp2 dd ?
+  temp3 dd ?
+  temp4 dd ?
+  temp5 dd ?
+  temp6 dd ?
 endl
 
-  xor eax, eax                  ; EAX = 00h
   mov ebx, dword [buffer]       ; EBX = buffer
 
-  ;; if (isNaN(EAX))  return 'NaN'
-  ;; if (isInf(EAX))  return 'Inf'
-  ;; if (isZero(EAX)) return '0'
+  stdcall isinf, dword [number] ;\
+  test al, al                   ; |
+  jz @f                         ; | if (!isinf(number)) goto @f
 
-  fldz                          ; push(0)
-  fld dword [number]            ; push(number)
+  mov dword [ebx], 000666E49h   ; buffer = 'Inf\0'
+  jmp .endp
+@@:
 
-  fcomip st, st1                ;\
-  seta al                       ; | AL = (st0 < st1)
+  stdcall isnan, dword [number] ;\
+  test al, al                   ; |
+  jz @f                         ; | if (!isnan(number)) goto @f
 
-  fstp st0                      ; pop()
+  mov dword [ebx], 0004E614Eh   ; buffer = 'NaN\0'
+  jmp .endp
+@@:
 
-  mov dword [_neg], eax         ; _neg = EAX
+  fldz                          ;\
+  fld dword [number]            ; |
+  fcomip st0, st1               ; |
+  fstp st0                      ; |
+  jnz @f                        ; | if (number) goto @f
 
-  cmp al, 00h                   ;\
-  jne @f                        ; | if (!AL) goto @f
+  mov dword [ebx], 000000030h   ; buffer = '0\0'
+  jmp .endp
+@@:
 
-  fld dword [number]            ;\
-  fchs                          ; |
-  fstp dword [number]           ; | number = -number
+  fnstcw word [temp1]           ;\
+  or word [temp1], 0c00h        ; |
+  fldcw word [temp1]            ; | FPU.setRounding(FPU.toZero)
+
+  fld dword [number]            ; fpush(number)
+  fldz                          ; fpush(0)
+
+  fcomip st0, st1               ;\
+  seta al                       ; |
+  movzx eax, al                 ; | EAX = (st0 > st1)
+  mov dword [temp1], eax        ; temp1 = EAX
+
+  test al, al                   ;\
+  jz .positive                  ; | if (!EAX) goto .positive
 
   mov byte [ebx], '-'           ;\
   inc ebx                       ; | *(buffer++) = '-'
-@@:
+
+  fchs                          ;\
+  fst dword [number]            ; | number = -fpop()
+.positive:
+
+  fstp st0                      ; fpop()
+
+  fnstcw word [temp3]           ;\
+  mov ax, word [temp3]          ; |
+  and ax, 0F3FFh                ; |
+  mov word [temp3], ax          ; |
+  fldcw word [temp3]            ; | FPU.setRounding(FPU.toNeighbour)
 
   fldlg2                        ;\
   fld dword [number]            ; |
-  fyl2x                         ; | push(log2(number) * lg(2))
-  fistp dword [m]               ; m = Int(pop())
+  fyl2x                         ; |
+  fistp dword [temp2]           ; | temp2 = Int(log10(number))
+  mov eax, dword [temp2]        ; EAX = temp2
 
-  mov eax, dword [m]            ; EAX = m
+  fnstcw word [temp3]           ;\
+  or word [temp3], 0c00h        ; |
+  fldcw word [temp3]            ; | FPU.setRounding(FPU.toZero)
 
   cmp eax, 0Eh                  ;\
-  jge .useExp_true              ; | if (m >= 14d) goto .useExp_true
+  jge .useExp_true              ; | if (EAX >= 14d) goto .useExp_true
 
-  cmp eax, -09h                 ;\
-  jle .useExp_true              ; | if (m <= -9d) goto .useExp_true
+  cmp eax, -9d                  ;\
+  jle .useExp_true              ; | if (EAX <= -9d) goto .useExp_true
 
   cmp eax, 09h                  ;\
   jl .useExp_false              ; | if (m < 9d) goto .useExp_false
 
-  mov eax, dword [_neg]         ; EAX = _neg
-
-  test eax, eax                 ;\
-  jz .useExp_true               ; | if (!neg) goto .useExp_false
-
+  mov eax, dword [temp1]        ;\
+  test eax, eax                 ; |
+  jz .useExp_false              ; | if (temp1) goto .useExp_false
 .useExp_true:
-  mov dword [useExp], 01h       ; useExp = 01h
-  jmp @f
+  mov ecx, 01h                  ; ECX = 01h
+
+  cmp dword [temp2], 00h        ;\
+  jge @f                        ; | if (temp2 >= 00h) goto @f
+;;dec dword [temp2]             ; --temp2
+@@:
+  stdcall pow, 10.0, dword [temp2] ;\
+  mov dword [temp3], eax           ; | temp3 = pow(10.0, temp2)
+
+  fld dword [number]            ; fpush(number)
+  fld dword [temp3]             ; fpush(temp3)
+
+  fdivp                         ;\
+  fstp dword [number]           ; | number = 1/fpop() * fpop()
+
+  mov eax, dword [temp2]        ;\
+  mov dword [temp3], eax        ; | temp3 = temp2
+  mov dword [temp2], 00h        ; temp2 = 00h
+
+  jmp .useExp_end
 .useExp_false:
-  mov dword [useExp], 00h       ; useExp = 00h
-@@:
+  mov ecx, 00h                  ; ECX = 00h
+.useExp_end:
+  mov dword [temp1], ecx        ; temp1 = ECX
 
-  cmp dword [useExp], 00h       ;\
-  je .endIf0                    ; | if (!useExp) goto .endIf0
-
-  cmp dword [m], 00h            ;\
-  jge @f                        ; | if (m >= 00h) goto @f
-
-  sub dword [m], 01h            ; m -= 1
-@@:
-
-  stdcall power, 10.0, dword [m] ; EAX = power(10.0, m)
-
-  fld dword [number]            ; push(number)
-  mov dword [temp0], eax        ;\
-  fld dword [temp0]             ; | push(EAX)
-
-  fdivp                         ; push(1/pop()*pop())
-  fstp dword [number]           ; number = pop()
-
-  mov eax, dword [m]            ;\
-  mov dword [m1], eax           ; | m1= m
-  mov dword [m], 00h            ; m = 00h
-.endIf0:
-
-  cmp dword [m], 01h            ;\
-  jge @f                        ; |
-  mov dword [m], 00h            ; | if (m < 01h) m = 00h
+  cmp dword [temp2], 01h        ;\
+  jge @f                        ; | if (temp2 >= 01h) goto @f
+  mov dword [temp2], 00h        ; temp2 = 00h
 @@:
 
   jmp .condLoop0
 .startLoop0:
+  stdcall pow, 10.0, dword [temp2] ;\
+  mov dword [temp5], eax           ; | temp5 = pow(10.0, temp2)
 
-  stdcall power, 10.0, dword [m] ;\
-  mov dword [weight], eax        ; | weight = power(10.0, m)
+  fldz                          ; fpush(0)
+  fld dword [temp5]             ; fpush(temp5)
 
-  fldz                          ; push(0)
-  fld dword [weight]            ; push(weight)
-  fcomip st, st1                          ;\
-  fstp st0                      ; pop()   ; |
-  jbe @f                                  ; | if (pop() <= pop()) goto @f
+  fcomip st0, st1               ;\
+  fstp st0                      ; |
+  jbe @f                        ; | if (temp5 <= 0) goto @f
 
-  stdcall isinf, dword [weight] ; EAX = isinf(weight)
-  cmp eax, 01h                  ;\
-  je @f                         ; | if (EAX) goto @f
+  stdcall isinf, dword [temp5]  ; EAX = isinf(temp5)
 
-  fld dword [number]            ; push(number)
-  fld dword [weight]            ; push(weight)
-  fdivp                         ; push(1/pop()*pop())
+  test al, al                   ;\
+  jnz @f                        ; | if (AL) goto @f
 
-  fst dword [temp0]             ;\
-  stdcall floor, dword [temp0]  ; |
-  mov dword [digit], eax        ; | digit = floor(top())
+  fld dword [number]            ; fpush(number)
+  fld dword [temp5]             ; fpush(temp5)
 
-  fld dword [weight]            ; push(weight)
-  fmulp                         ; push(pop()*pop())
-  fsub dword [number]           ; ST(0) -= number
-  fchs                          ; ST(0) = -ST(0)
-  fstp dword [number]           ; number = pop()
+  fdivp                         ;\
+  fstp dword [temp6]            ; | temp6 = 1/fpop()*fpop()
 
-  mov eax, dword [digit]        ;\
-  add eax, '0'                  ; | EAX = digit + '0'
+  stdcall floor, dword [temp6]  ;\
+  mov dword [temp6], eax        ; | temp6 = floor(temp6)
 
+  fld dword [number]            ; fpush(number)
+
+  fild dword [temp6]            ;\
+  fmul dword [temp5]            ; | fpush(Float(temp6)*temp5)
+
+  fsubp                         ;\
+  fstp dword [number]           ; | number = -fpop() + fpop()
+
+  add al, '0'                   ; AL += '0'
   mov byte [ebx], al            ;\
   inc ebx                       ; | *(buffer++) = AL
-@@:
+  @@:
 
-  cmp dword [m], 00h            ;\
-  jne @f                        ; | if (m != 00h) goto @f
+  cmp dword [temp2], 00h        ;\
+  jne @f                        ; | if (temp2) goto @f
 
-  cmp dword [number], 00h       ;\
-  jle @f                        ; | if (number <= 00h) goto @f
+  fldz                          ; fpush(0)
+  fld dword [number]            ; fpush(number)
+
+  fcomip st0, st1               ;\
+  fstp st0                      ; |
+  jbe @f                        ; | if (number <= 0) goto @f
 
   mov byte [ebx], '.'           ;\
   inc ebx                       ; | *(buffer++) = '.'
 @@:
 
-  sub dword [m], 01h            ; --m
+  dec dword [temp2]             ; --temp2
 
 .condLoop0:
-  cmp dword [m], 00h            ;\
-  jge .startLoop0               ; | if (m >= 00h) goto .startLoop0
+  cmp dword [temp2], 00h        ;\
+  jge .startLoop0               ; | if (temp2 >= 00h) goto .startLoop0
 
-  fld dword [const]             ; push(1e-12)
-  fld dword [number]            ; push(number)
-  fcomip st, st1                        ;\
-  fstp st0                      ; pop() ; |
-  jg .startLoop0                        ; | if (number > 1e-12) goto .startLoop0
+  mov dword [temp4], 1e-9       ;\
+  fld dword [temp4]             ; | fpush(1e-9)
+  fld dword [number]            ; fpush(number)
 
-  cmp dword [useExp], 00h       ;\
-  je @f                         ; | if (!useExp) goto @f
+  fcomip st0, st1               ;\
+  fstp st0                      ; |
+  ja .startLoop0                ; | if (number > 1e-14) goto .startLoop0
+
+  cmp dword [temp1], 00h        ;\
+  je .withoutExp                ; | if (!temp1) goto @f
 
   mov byte [ebx], 'e'           ;\
   inc ebx                       ; | *(buffer++) = 'e'
 
-  cmp dword [m1], 00h           ;\
-  jle .else                     ; | if (m1 <= 00h) goto .else
-
-  mov byte [ebx], '+'           ;\
-  inc ebx                       ; | *(buffer++) = '+'
-
-  jmp .endIf
-.else:
-  mov byte [ebx], '-'           ;\
-  inc ebx                       ; | *(buffer++) = '-'
-  neg dword [m1]                ; m1 = -m1
-
-.endIf:
-  mov dword [m], 00h            ; m = 00h
-
-  jmp .condLoop1
-.startLoop1:
-
-  xor edx, edx                  ; EDX = 00h
-  mov eax, dword [m1]           ; EAX = m1
-
-  mov esi, 0Ah                  ;\
-  idiv esi                      ; | EDX = EAX % 0Ah, EAX = EAX / 0AH
-
-  mov dword [m1], eax           ; m1 /= 0Ah
-
-  mov al, '0'                   ;\
-  add al, dl                    ; | AL = '0' + Dl
+  cmp dword [temp3], 00h        ;\
+  setle al                      ; |
+  shl al, 01h                   ; |
+  add al, '+'                   ; | AL = (temp3 > 00h) ? '+' : '-'
 
   mov byte [ebx], al            ;\
   inc ebx                       ; | *(buffer++) = AL
 
-  inc dword [m]                 ; ++m
+  cmp al, '-'                   ;\
+  jne @f                        ; | if (AL != '-') goto @f
+
+  neg dword [temp3]             ; temp3 = -temp3
+@@:
+  mov dword [temp2], 00h        ; temp2 = 00h
+
+  jmp .condLoop1
+.startLoop1:
+
+  mov ecx, dword [temp3]        ; ECX = temp3
+
+  mov eax, ecx                  ;\
+  mov edx, 033333334h           ; |
+  imul edx                      ; |
+  shr edx, 01h                  ; | EDX = ECX * Number.approximate(1/10)
+
+  mov dword [temp3], edx        ; temp3 /= 0Ah
+
+  mov eax, edx                  ;\
+  shl edx, 02h                  ; |
+  add edx, eax                  ; |
+  shl edx, 01h                  ; | EDX *= 10
+
+  sub ecx, edx                  ; ECX -= EDX
+
+  add cl, '0'                   ; CL += '0'
+
+  mov byte [ebx], cl            ;\
+  inc ebx                       ; | *(buffer++) = CL
+
+  inc dword [temp2]             ; ++temp2
 
 .condLoop1:
-  cmp dword [m1], 00h           ;\
-  jg .startLoop1                ; | if (m1 > 00h) goto .startLoop1
+  cmp dword [temp3], 00h        ;\
+  jg .startLoop1                ; | if (temp3 > 00h) goto .startLoop1
 
-  sub ebx, dword [m]            ; buffer -= m
+  sub ebx, dword [temp2]        ; buffer -= temp2
 
-  mov edi, 00h                  ; i = 00h
-  mov esi, dword [m]            ;\
-  dec esi                       ; | j = m - 01h
+  mov eax, ebx                  ; EAX = buffer
+  mov ecx, ebx                  ;\
+  add ecx, dword [temp2]        ; |
+  dec ecx                       ; | ECX = buffer + temp2 - 01h
 
   jmp .condLoop2
 .startLoop2:
+  mov dl, byte [eax]            ;\
+  mov dh, byte [ecx]            ; |
+  xchg dl, dh                   ; |
+  mov byte [eax], dl            ; |
+  mov byte [ecx], dh            ; | *EAX, *ECX = *ECX, *EAX
 
-  mov eax, ebx                  ;\
-  add eax, edi                  ; | EAX = buffer + i
-
-  mov edx, ebx                  ;\
-  add edx, esi                  ; | EDX = buffer + j
-
-  mov cl, byte [eax]            ; CL = [EAX]
-  mov ch, byte [edx]            ; CH = [EAX]
-
-  xchg cl, ch                   ; Swap(CL, CH)
-
-  mov byte [eax], cl            ; [EAX] = CL
-  mov byte [edx], ch            ; [EAX] = CH
-
-  inc edi                       ; ++i
-  dec esi                       ; --j
+  inc eax                       ; ++EAX
+  dec ecx                       ; --ECX
 
 .condLoop2:
-  cmp edi, esi                  ;\
-  jl .startLoop2                ; | if (i < j) goto .startLoop2
+  cmp eax, ecx                  ;\
+  jl .startLoop2                ; | if (EAX < ECX) goto .startLoop2
 
-  add ebx, dword [m]            ; buffer += m
-@@:
+  add ebx, dword [temp2]        ; buffer += temp2
 
-  mov byte [es:ebx], 00h        ; *buffer = 00h
+.withoutExp:
+  mov byte [ebx], 00h        ; *buffer = 00h
+.endp:
   ret
 endp
 ;;; ================================================================
@@ -644,11 +673,24 @@ endp
 ;;; @param [in] index - index of power
 ;;; @return EAX - power
 ;;; ================================================================
-proc power stdcall uses ecx, base: dword, index: byte
+proc pow stdcall uses ecx, base: dword, power: dword
+
+  mov ecx, dword [power]        ; ECX = power
+
+  cmp ecx, 01h                  ;\
+  je .one                       ; | if (ECX == 01h) goto .one
+
+  test ecx, ecx                 ;\
+  jz .zero                      ; | if (!ECX) goto .zero
+  jns .positive                 ; if (!Sign(EAX)) goto .positive
+
+  neg ecx                       ; ECX = -ECX
+  jmp .negative
+
+.positive:
+  dec ecx                       ; --ECX
 
   fld dword [base]              ; push(base)
-
-  mov ecx, dword [index]        ; Loop.initCounter(ECX)
 @@:
   fmul dword [base]             ; push(pop()*base)
   loop @b                       ; Loop.updateAndCheckCounter(ECX)
@@ -656,6 +698,23 @@ proc power stdcall uses ecx, base: dword, index: byte
   fstp dword [base]             ;\
   mov eax, dword [base]         ; | EAX = pop()
 
+  jmp .endp
+.negative:
+  fld1                          ; push(1)
+@@:
+  fdiv dword [base]             ; push(pop()/base)
+  loop @b                       ; Loop.updateAndCheckCounter(ECX)
+
+  fstp dword [base]             ;\
+  mov eax, dword [base]         ; | EAX = pop()
+  jmp .endp
+
+.zero:
+  mov eax, 1.0                  ; EAX = 1.0
+  jmp .endp
+.one:
+  mov eax, dword [base]         ; EAX = base
+.endp:
   ret
 endp
 ;;; ================================================================
@@ -713,7 +772,7 @@ proc isnan stdcall uses ebx, number: dword
   shr ebx, 017h                 ; | EBX = exp(EAX)
 
   cmp ebx, 0FFh                 ;\
-  jne                           ; | if (EBX != 0FFh) goto @f
+  jne @f                        ; | if (EBX != 0FFh) goto @f
 
   mov eax, 01h                  ; EAX = 01h
   jmp .endp
@@ -733,18 +792,15 @@ endp
 proc floor stdcall number: dword
 
 locals
-  originalBuffer dw ?
-  buffer         dw ?
+  buffer dw ?
 endl
 
-  fnstcw word [originalBuffer]  ; originalBuffer = CR
-
-  mov ax, word [originalBuffer] ;\
+  fnstcw word [buffer]          ;\
+  mov ax, word [buffer]         ; |
   and ax, 0F3FFh                ; |
   or  ax, 00400h                ; |
-  mov word [buffer], ax         ; | buffer = CR & 0F3FFh | 00400h
-
-  fldcw word [buffer]           ; CR = buffer
+  mov word [buffer], ax         ; |
+  fldcw word [buffer]           ; | FPU.setRounding(FPU.toNegInf)
 
   fld dword [number]            ;\
   frndint                       ; | push(Int(number))
@@ -752,7 +808,9 @@ endl
   fistp dword [number]          ;\
   mov eax, dword [number]       ; | EAX = pop()
 
-  fldcw word [originalBuffer]   ; CR = originalBuffer
+  fnstcw word [buffer]          ;\
+  or word [buffer], 0c00h       ; |
+  fldcw word [buffer]           ; | FPU.setRounding(FPU.toZero)
 
   ret
 endp
